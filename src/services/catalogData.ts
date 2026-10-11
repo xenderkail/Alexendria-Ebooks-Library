@@ -575,7 +575,6 @@ export const PUBLIC_DOMAIN_CATALOG: CatalogBook[] = [
     language: 'ur',
     direction: 'rtl',
     description: 'The pinnacle of Urdu classical poetry, featuring philosophical inquiries, linguistic genius, and timeless ghazals.',
-    textUrl: '/api/proxy-download?url=https://raw.githubusercontent.com/urdu-nlp/urdu-monolingual-corpus/master/ghalib.txt',
   },
   {
     id: 'urdu-shikwa-jawab',

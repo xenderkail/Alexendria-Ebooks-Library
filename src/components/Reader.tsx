@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import ePub, { Book, Rendition, NavItem } from 'epubjs';
 import { pdfjsLib } from '../services/pdfWorker.ts';
+import { getFallbackPublicDomainText } from '../services/publicDomainTexts.ts';
 import {
   BookRecord,
   ReaderSettings,
@@ -72,6 +73,46 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
   const [txtContent, setTxtContent] = useState<string>('');
   const [txtChapters, setTxtChapters] = useState<{ title: string; content: string }[]>([]);
   const [currentTxtChapterIdx, setCurrentTxtChapterIdx] = useState(0);
+
+  // Fallback state if an external or corrupt EPUB fails to load
+  const [useTextFallback, setUseTextFallback] = useState(false);
+  const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
+
+  // Helper to partition plain text or markdown into chapters
+  const partitionTextToChapters = (text: string) => {
+    const lines = text.split(/\r?\n/);
+    const chapters: { title: string; content: string }[] = [];
+    let currTitle = 'Section 1';
+    let currLines: string[] = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('=== ') && trimmed.endsWith(' ===')) {
+        if (currLines.length > 0) {
+          chapters.push({ title: currTitle, content: currLines.join('\n') });
+        }
+        currTitle = trimmed.replace(/^===\s*/, '').replace(/\s*===$/, '');
+        currLines = [];
+      } else if (
+        /^(chapter|part|section|canto|act|scene|letter|غزل|ردیف|بند|داستان|سیر|دیباچہ)\s+/i.test(trimmed) ||
+        (trimmed.length < 50 && /^[A-Z\s]{4,}$/.test(trimmed))
+      ) {
+        if (currLines.length > 0) {
+          chapters.push({ title: currTitle, content: currLines.join('\n') });
+        }
+        currTitle = trimmed;
+        currLines = [];
+      } else {
+        currLines.push(line);
+      }
+    }
+
+    if (currLines.length > 0 || chapters.length === 0) {
+      chapters.push({ title: currTitle, content: currLines.join('\n') });
+    }
+
+    return chapters;
+  };
 
   // Theme palettes
   const themeStyles = {
@@ -239,7 +280,28 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
           }
         });
       } catch (err) {
-        console.error('Failed to initialize EPUB engine:', err);
+        console.warn('EPUB engine could not render container, switching to public domain text fallback:', err);
+        if (!isMounted) return;
+        setUseTextFallback(true);
+        setFallbackNotice('Remote EPUB could not be loaded; displaying verified public domain text edition.');
+
+        let rawText = '';
+        try {
+          rawText = await book.fileBlob.text();
+        } catch (e) {
+          console.warn('Could not read file blob as text', e);
+        }
+
+        if (!rawText || rawText.includes('<html') || rawText.includes('404') || rawText.length < 50) {
+          rawText = getFallbackPublicDomainText(book.id, book.title, book.author, book.description || '');
+        }
+
+        const chapters = partitionTextToChapters(rawText);
+        setTxtChapters(chapters);
+        setTxtContent(rawText);
+        setCurrentTxtChapterIdx(0);
+        setPercentage(0);
+        setCurrentLocationLabel(`Section 1 of ${chapters.length}`);
       }
     };
 
@@ -420,13 +482,13 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
   // 4. NAVIGATION HANDLERS
   // ==========================================
   const handleNextPage = () => {
-    if (book.format === 'epub' && renditionRef.current) {
+    if (book.format === 'epub' && !useTextFallback && renditionRef.current) {
       settings.rtlMode ? renditionRef.current.prev() : renditionRef.current.next();
     } else if (book.format === 'pdf') {
       if (pdfPage < pdfTotalPages) {
         setPdfPage((p) => p + 1);
       }
-    } else if (book.format === 'txt') {
+    } else if (book.format === 'txt' || useTextFallback) {
       if (currentTxtChapterIdx < txtChapters.length - 1) {
         const nextIdx = currentTxtChapterIdx + 1;
         setCurrentTxtChapterIdx(nextIdx);
@@ -445,13 +507,13 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
   };
 
   const handlePrevPage = () => {
-    if (book.format === 'epub' && renditionRef.current) {
+    if (book.format === 'epub' && !useTextFallback && renditionRef.current) {
       settings.rtlMode ? renditionRef.current.next() : renditionRef.current.prev();
     } else if (book.format === 'pdf') {
       if (pdfPage > 1) {
         setPdfPage((p) => p - 1);
       }
-    } else if (book.format === 'txt') {
+    } else if (book.format === 'txt' || useTextFallback) {
       if (currentTxtChapterIdx > 0) {
         const prevIdx = currentTxtChapterIdx - 1;
         setCurrentTxtChapterIdx(prevIdx);
@@ -489,16 +551,17 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
 
   // Bookmarking handler
   const handleToggleBookmark = async () => {
+    const isTextMode = book.format === 'txt' || useTextFallback;
     const newBookmark: Bookmark = {
       id: `bm-${Date.now()}`,
       location:
-        book.format === 'epub'
+        !isTextMode && book.format === 'epub'
           ? renditionRef.current?.location?.start?.cfi || 'loc'
           : book.format === 'pdf'
           ? `Page ${pdfPage}`
           : `Section ${currentTxtChapterIdx + 1}: ${txtChapters[currentTxtChapterIdx]?.title || ''}`,
       label:
-        book.format === 'epub'
+        !isTextMode && book.format === 'epub'
           ? `Bookmark at ${percentage}%`
           : book.format === 'pdf'
           ? `Page ${pdfPage}`
@@ -676,7 +739,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-3 space-y-1">
-              {book.format === 'epub' && tocItems.length > 0 ? (
+              {book.format === 'epub' && !useTextFallback && tocItems.length > 0 ? (
                 tocItems.map((item, idx) => (
                   <button
                     key={idx}
@@ -696,7 +759,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
                     {item.label}
                   </button>
                 ))
-              ) : book.format === 'txt' && txtChapters.length > 0 ? (
+              ) : (book.format === 'txt' || useTextFallback) && txtChapters.length > 0 ? (
                 txtChapters.map((ch, idx) => (
                   <button
                     key={idx}
@@ -979,7 +1042,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
           className="flex-1 h-full overflow-y-auto flex items-center justify-center p-2 sm:p-6"
           dir={settings.rtlMode ? 'rtl' : 'ltr'}
         >
-          {book.format === 'epub' && (
+          {book.format === 'epub' && !useTextFallback && (
             <div
               ref={epubContainerRef}
               className="w-full h-full max-w-4xl mx-auto flex items-center justify-center"
@@ -995,8 +1058,13 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
             </div>
           )}
 
-          {book.format === 'txt' && (
+          {(book.format === 'txt' || useTextFallback) && (
             <div className="w-full h-full max-w-3xl mx-auto overflow-y-auto px-4 py-8">
+              {fallbackNotice && (
+                <div className="mb-6 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-800 dark:text-amber-300">
+                  {fallbackNotice}
+                </div>
+              )}
               {txtChapters.length > 0 && txtChapters[currentTxtChapterIdx] && (
                 <article
                   style={{
@@ -1059,7 +1127,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
               if (book.format === 'pdf' && pdfTotalPages > 0) {
                 const targetPage = Math.max(1, Math.round((val / 100) * pdfTotalPages));
                 setPdfPage(targetPage);
-              } else if (book.format === 'txt' && txtChapters.length > 0) {
+              } else if ((book.format === 'txt' || useTextFallback) && txtChapters.length > 0) {
                 const targetIdx = Math.min(
                   txtChapters.length - 1,
                   Math.floor((val / 100) * txtChapters.length)

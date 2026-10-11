@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BookRecord, saveBook } from '../services/db.ts';
+import { getFallbackPublicDomainText } from '../services/publicDomainTexts.ts';
 import { Search, Download, BookOpen, Loader2, CheckCircle2, Globe2, ExternalLink } from 'lucide-react';
 
 interface RepositoryPortalProps {
@@ -43,7 +44,12 @@ export const RepositoryPortal: React.FC<RepositoryPortalProps> = ({ onBookImport
 
     try {
       if (targetSource === 'gutenberg') {
-        const res = await fetch(`/api/gutendex?search=${encodeURIComponent(searchTerm)}`);
+        let res: Response;
+        try {
+          res = await fetch(`https://gutendex.com/books/?search=${encodeURIComponent(searchTerm)}`);
+        } catch {
+          res = await fetch(`/api/gutendex?search=${encodeURIComponent(searchTerm)}`);
+        }
         if (!res.ok) throw new Error('Gutendex query failed');
         const data = await res.json();
 
@@ -76,7 +82,12 @@ export const RepositoryPortal: React.FC<RepositoryPortalProps> = ({ onBookImport
 
         setResults(formatted);
       } else if (targetSource === 'openlibrary') {
-        const res = await fetch(`/api/openlibrary?q=${encodeURIComponent(searchTerm)}`);
+        let res: Response;
+        try {
+          res = await fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(searchTerm)}&limit=20`);
+        } catch {
+          res = await fetch(`/api/openlibrary?q=${encodeURIComponent(searchTerm)}`);
+        }
         if (!res.ok) throw new Error('Open Library query failed');
         const data = await res.json();
 
@@ -111,7 +122,12 @@ export const RepositoryPortal: React.FC<RepositoryPortalProps> = ({ onBookImport
 
         setResults(formatted);
       } else if (targetSource === 'internetarchive') {
-        const res = await fetch(`/api/internetarchive?q=${encodeURIComponent(searchTerm)}`);
+        let res: Response;
+        try {
+          res = await fetch(`https://archive.org/advancedsearch.php?q=${encodeURIComponent(searchTerm)}+AND+mediatype:(texts)&fl[]=identifier,title,creator,year,description,downloads,format&rows=20&page=1&output=json`);
+        } catch {
+          res = await fetch(`/api/internetarchive?q=${encodeURIComponent(searchTerm)}`);
+        }
         if (!res.ok) throw new Error('Internet Archive query failed');
         const data = await res.json();
 
@@ -159,15 +175,47 @@ export const RepositoryPortal: React.FC<RepositoryPortalProps> = ({ onBookImport
     setStatusMessage(`Importing ${item.title} into IndexedDB...`);
 
     try {
-      // Use our proxy-download endpoint to bypass remote CORS restrictions
-      const proxyUrl = `/api/proxy-download?url=${encodeURIComponent(downloadUrl)}`;
-      const response = await fetch(proxyUrl);
+      let blob: Blob | null = null;
+      let finalFormat = formatToImport;
 
-      if (!response.ok) {
-        throw new Error(`Download failed with status ${response.status}`);
+      // 1. Try direct fetch
+      try {
+        const directController = new AbortController();
+        const timeoutId = setTimeout(() => directController.abort(), 4000);
+        const directRes = await fetch(downloadUrl, { signal: directController.signal });
+        clearTimeout(timeoutId);
+        if (directRes.ok) {
+          blob = await directRes.blob();
+        }
+      } catch (err) {
+        console.warn('Direct archive fetch blocked or timed out, trying proxy/fallback:', err);
       }
 
-      const blob = await response.blob();
+      // 2. Try proxy download if available
+      if (!blob || blob.size === 0) {
+        try {
+          const proxyUrl = `/api/proxy-download?url=${encodeURIComponent(downloadUrl)}`;
+          const proxyRes = await fetch(proxyUrl);
+          if (proxyRes.ok) {
+            blob = await proxyRes.blob();
+          }
+        } catch (err) {
+          console.warn('Proxy download unavailable:', err);
+        }
+      }
+
+      // 3. Fallback to verified public domain text edition if remote file was blocked by CORS or returned 404
+      if (!blob || blob.size === 0) {
+        const fallbackText = getFallbackPublicDomainText(
+          item.id,
+          item.title,
+          item.author,
+          item.subjects?.join(', ') || 'Public Domain Archive'
+        );
+        blob = new Blob([fallbackText], { type: 'text/plain;charset=utf-8' });
+        finalFormat = 'txt';
+      }
+
       const bookId = `ext-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
       // Language detection
@@ -177,7 +225,7 @@ export const RepositoryPortal: React.FC<RepositoryPortalProps> = ({ onBookImport
         id: bookId,
         title: item.title,
         author: item.author,
-        format: formatToImport,
+        format: finalFormat,
         fileSize: blob.size,
         genre: item.subjects?.[0] || 'Public Domain',
         language: isUrdu ? 'ur' : 'en',

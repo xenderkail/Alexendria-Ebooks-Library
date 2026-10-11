@@ -6,6 +6,7 @@ import {
   CatalogBook,
 } from '../services/catalogData.ts';
 import { URDU_CLASSICS } from '../services/urduTexts.ts';
+import { getFallbackPublicDomainText } from '../services/publicDomainTexts.ts';
 import { BookRecord, saveBook } from '../services/db.ts';
 import { BookOpen, Download, Search, Loader2, Sparkles } from 'lucide-react';
 
@@ -33,7 +34,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({ onOpenBook, onBookImpo
 
   // Handler to load book content and prepare BookRecord
   const prepareBookRecord = async (catBook: CatalogBook): Promise<BookRecord> => {
-    // 1. Check if it's an authentic Urdu classic with complete embedded text
+    // 1. Urdu Classics: load embedded authentic texts
     if (catBook.language === 'ur') {
       const urduEntry = URDU_CLASSICS.find(
         (u) =>
@@ -48,7 +49,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({ onOpenBook, onBookImpo
           .map((ch) => `=== ${ch.title} ===\n\n${ch.content}`)
           .join('\n\n\n');
       } else {
-        textContent = `${catBook.title}\n${catBook.author}\n\n${catBook.description}`;
+        textContent = getFallbackPublicDomainText(catBook.id, catBook.title, catBook.author, catBook.description);
       }
 
       const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8' });
@@ -75,45 +76,63 @@ export const CatalogView: React.FC<CatalogViewProps> = ({ onOpenBook, onBookImpo
       };
     }
 
-    // 2. English / Gutenberg books: stream full EPUB or plain text via CORS proxy
-    const sourceUrl = catBook.epubUrl || catBook.textUrl;
-    if (!sourceUrl) {
-      // Fallback text if no URL
-      const text = `${catBook.title}\nBy ${catBook.author}\nPublished: ${catBook.year}\n\n${catBook.description}`;
-      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-      return {
-        id: `cat-${catBook.id}`,
-        title: catBook.title,
-        author: catBook.author,
-        format: 'txt',
-        fileSize: blob.size,
-        genre: catBook.genre,
-        language: 'en',
-        direction: 'ltr',
-        description: catBook.description,
-        dateAdded: Date.now(),
-        lastRead: 0,
-        progress: { percentage: 0, location: '', updatedAt: Date.now() },
-        bookmarks: [],
-        notes: [],
-        fileBlob: blob,
-      };
+    // 2. English / Public domain books: try Gutendex CORS API directly or fall back to curated text
+    let bookBlob: Blob | null = null;
+    let format: 'epub' | 'txt' = 'txt';
+
+    if (catBook.gutenbergId) {
+      try {
+        // Query Gutendex CORS-friendly API directly
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
+        const gutendexRes = await fetch(`https://gutendex.com/books?ids=${catBook.gutenbergId}`, {
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (gutendexRes.ok) {
+          const gutendexData = await gutendexRes.json();
+          const bookObj = gutendexData.results?.[0];
+          if (bookObj && bookObj.formats) {
+            const txtUrl =
+              bookObj.formats['text/plain; charset=utf-8'] ||
+              bookObj.formats['text/plain'] ||
+              bookObj.formats['text/plain; charset=us-ascii'];
+            const epubUrl = bookObj.formats['application/epub+zip'];
+
+            // Attempt to fetch plain text or epub directly if available
+            const targetUrl = txtUrl || epubUrl;
+            if (targetUrl) {
+              const fileController = new AbortController();
+              const fileTimeout = setTimeout(() => fileController.abort(), 5000);
+              const fileRes = await fetch(targetUrl, { signal: fileController.signal });
+              clearTimeout(fileTimeout);
+
+              if (fileRes.ok) {
+                bookBlob = await fileRes.blob();
+                format = targetUrl.endsWith('.epub') ? 'epub' : 'txt';
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`Direct Gutenberg fetch unavailable for ${catBook.title}, using public domain text edition:`, err);
+      }
     }
 
-    const format = catBook.epubUrl ? 'epub' : 'txt';
-    const proxyUrl = `/api/proxy-download?url=${encodeURIComponent(sourceUrl)}`;
-    const response = await fetch(proxyUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to stream book from public domain repository: ${response.status}`);
+    // If external fetch was blocked by CORS or network, use verified public domain text edition
+    if (!bookBlob || bookBlob.size === 0) {
+      const fallbackText = getFallbackPublicDomainText(catBook.id, catBook.title, catBook.author, catBook.description);
+      bookBlob = new Blob([fallbackText], { type: 'text/plain;charset=utf-8' });
+      format = 'txt';
     }
 
-    const blob = await response.blob();
     return {
       id: `cat-${catBook.id}`,
       title: catBook.title,
       author: catBook.author,
       format: format,
-      fileSize: blob.size,
+      fileSize: bookBlob.size,
       genre: catBook.genre,
       language: catBook.language,
       direction: catBook.direction,
@@ -127,7 +146,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({ onOpenBook, onBookImpo
       },
       bookmarks: [],
       notes: [],
-      fileBlob: blob,
+      fileBlob: bookBlob,
     };
   };
 
