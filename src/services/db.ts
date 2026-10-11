@@ -1,6 +1,6 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
 
-export type BookFormat = 'epub' | 'pdf' | 'txt' | 'mobi';
+export type BookFormat = 'epub' | 'pdf' | 'txt' | 'mobi' | 'html';
 export type BookLanguage = 'en' | 'ur' | 'other';
 export type ReadingDirection = 'ltr' | 'rtl';
 

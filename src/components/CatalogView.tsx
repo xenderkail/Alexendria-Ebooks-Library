@@ -7,6 +7,7 @@ import {
 } from '../services/catalogData.ts';
 import { URDU_CLASSICS } from '../services/urduTexts.ts';
 import { getFallbackPublicDomainText } from '../services/publicDomainTexts.ts';
+import { fetchPublicDomainBook } from '../services/bookFetcher.ts';
 import { BookRecord, saveBook } from '../services/db.ts';
 import { BookOpen, Download, Search, Loader2, Sparkles } from 'lucide-react';
 
@@ -68,6 +69,7 @@ export const CatalogView: React.FC<CatalogViewProps> = ({ onOpenBook, onBookImpo
         progress: {
           percentage: 0,
           location: '',
+          pageCurrent: 1,
           updatedAt: Date.now(),
         },
         bookmarks: [],
@@ -76,77 +78,44 @@ export const CatalogView: React.FC<CatalogViewProps> = ({ onOpenBook, onBookImpo
       };
     }
 
-    // 2. English / Public domain books: try Gutendex CORS API directly or fall back to curated text
-    let bookBlob: Blob | null = null;
-    let format: 'epub' | 'txt' = 'txt';
+    // 2. English / Public domain books: fetch dynamically via Gutendex with public CORS proxies
+    const fetchResult = await fetchPublicDomainBook({
+      id: catBook.id,
+      title: catBook.title,
+      author: catBook.author,
+      description: catBook.description,
+      gutenbergId: catBook.gutenbergId,
+      staticEpubUrl: catBook.epubUrl,
+      staticTextUrl: catBook.textUrl,
+    });
 
-    if (catBook.gutenbergId) {
-      try {
-        // Query Gutendex CORS-friendly API directly
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4000);
-        const gutendexRes = await fetch(`https://gutendex.com/books?ids=${catBook.gutenbergId}`, {
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-
-        if (gutendexRes.ok) {
-          const gutendexData = await gutendexRes.json();
-          const bookObj = gutendexData.results?.[0];
-          if (bookObj && bookObj.formats) {
-            const txtUrl =
-              bookObj.formats['text/plain; charset=utf-8'] ||
-              bookObj.formats['text/plain'] ||
-              bookObj.formats['text/plain; charset=us-ascii'];
-            const epubUrl = bookObj.formats['application/epub+zip'];
-
-            // Attempt to fetch plain text or epub directly if available
-            const targetUrl = txtUrl || epubUrl;
-            if (targetUrl) {
-              const fileController = new AbortController();
-              const fileTimeout = setTimeout(() => fileController.abort(), 5000);
-              const fileRes = await fetch(targetUrl, { signal: fileController.signal });
-              clearTimeout(fileTimeout);
-
-              if (fileRes.ok) {
-                bookBlob = await fileRes.blob();
-                format = targetUrl.endsWith('.epub') ? 'epub' : 'txt';
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.warn(`Direct Gutenberg fetch unavailable for ${catBook.title}, using public domain text edition:`, err);
-      }
-    }
-
-    // If external fetch was blocked by CORS or network, use verified public domain text edition
-    if (!bookBlob || bookBlob.size === 0) {
-      const fallbackText = getFallbackPublicDomainText(catBook.id, catBook.title, catBook.author, catBook.description);
-      bookBlob = new Blob([fallbackText], { type: 'text/plain;charset=utf-8' });
-      format = 'txt';
+    if (fetchResult.isFallback && fetchResult.fallbackMessage) {
+      setStatusMsg(fetchResult.fallbackMessage);
     }
 
     return {
       id: `cat-${catBook.id}`,
       title: catBook.title,
       author: catBook.author,
-      format: format,
-      fileSize: bookBlob.size,
+      format: fetchResult.format,
+      fileSize: fetchResult.blob.size,
       genre: catBook.genre,
       language: catBook.language,
       direction: catBook.direction,
-      description: catBook.description,
+      description: fetchResult.isFallback
+        ? `${fetchResult.fallbackMessage}\n\n${catBook.description}`
+        : catBook.description,
       dateAdded: Date.now(),
       lastRead: 0,
       progress: {
         percentage: 0,
         location: '',
+        pageCurrent: 1,
         updatedAt: Date.now(),
       },
       bookmarks: [],
       notes: [],
-      fileBlob: bookBlob,
+      fileBlob: fetchResult.blob,
     };
   };
 

@@ -65,14 +65,14 @@ export default function App() {
             fileBlob: ghalibBlob,
           };
 
-          const meditationsText = `BOOK ONE: MEDITATIONS OF MARCUS AURELIUS ANTONINUS
+          const meditationsText = `=== Book One: Debts and Lessons ===
 
 1. From my grandfather Verus I learned good morals and the government of my temper.
 2. From the reputation and remembrance of my father, modesty and a manly character.
 3. From my mother, piety and beneficence, and abstinence, not only from evil deeds, but even from evil thoughts; and further, simplicity in my way of living, far removed from the habits of the rich.
 4. From my great-grandfather, not to have frequented public schools, and to have had good teachers at home, and to know that on such things a man should spend liberally.
 
-BOOK TWO: ON THE RIVER GRANUA
+=== Book Two: On the River Granua ===
 
 1. When you wake up in the morning, tell yourself: The people I deal with today will be meddling, ungrateful, arrogant, dishonest, jealous, and surly. They are like this because they cannot distinguish good from evil. But I have seen the beauty of good, and the ugliness of evil, and have recognized that the wrongdoer has a nature related to my own—not of the same blood or birth, but the same mind, and possessing a share of the divine. And so none of them can hurt me. No one can implicate me in ugliness. Nor can I feel angry at my kin, or hate him. We were born to work together like feet, hands, and eyes, like the two rows of teeth, upper and lower. To obstruct each other is unnatural. To feel anger at someone, to turn your back on him: these are obstructions.`;
 

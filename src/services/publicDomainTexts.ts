@@ -338,23 +338,22 @@ export function getFallbackPublicDomainText(bookId: string, title: string, autho
   }
 
   // General high-quality public domain reading text
-  return `=== Title: ${title} ===
+  return `=== Chapter 1: ${title} — Historical Provenance ===
+
 Author: ${author}
 Public Domain Archive Edition · Alexandria Digital Library
-
-=== Section 1: Overview & Historical Provenance ===
 
 ${desc}
 
 This classic public-domain masterwork has been preserved and formatted for personal reading and research. It is free of copyright restrictions in most countries and is part of the shared universal heritage of humanity.
 
-=== Section 2: Opening Exposition ===
+=== Chapter 2: Opening Exposition & Themes ===
 
 The opening folios of ${title} established its author, ${author}, as a defining voice in its discipline. Written with intellectual vigor and stylistic eloquence, the text explores fundamental questions of the human condition, memory, morality, and discovery.
 
 As the narrative unfolds, the themes introduced in these opening pages resonate with timeless clarity, offering modern readers direct access to original primary source literature unmediated by commercial alterations.
 
-=== Section 3: Curatorial Reading Notes ===
+=== Chapter 3: Curatorial & Archival Notes ===
 
 Preserved locally within your browser's private IndexedDB storage.
 Adjust font styles, margins, or background color themes using the appearance controls in the top toolbar.`;

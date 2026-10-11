@@ -24,8 +24,9 @@ import {
   Minimize2,
   Sun,
   Moon,
-  Type,
   BookOpen,
+  AlignLeft,
+  FileText,
 } from 'lucide-react';
 
 interface ReaderProps {
@@ -49,8 +50,8 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Common Reader State
-  const [percentage, setPercentage] = useState<number>(book.progress?.percentage || 0);
-  const [currentLocationLabel, setCurrentLocationLabel] = useState<string>('');
+  const [percentage, setPercentage] = useState<number>(0);
+  const [currentLocationLabel, setCurrentLocationLabel] = useState<string>('Page 1');
   const [tocItems, setTocItems] = useState<NavItem[]>([]);
   const [activeTocHref, setActiveTocHref] = useState<string>('');
   const [bookRecord, setBookRecord] = useState<BookRecord>(book);
@@ -64,7 +65,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
   // PDF specifics
   const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
   const pdfDocRef = useRef<any>(null);
-  const [pdfPage, setPdfPage] = useState<number>(book.progress?.pageCurrent || 1);
+  const [pdfPage, setPdfPage] = useState<number>(1);
   const [pdfTotalPages, setPdfTotalPages] = useState<number>(book.progress?.pageTotal || 1);
   const [pdfScale, setPdfScale] = useState<number>(1.2);
   const [isPdfRendering, setIsPdfRendering] = useState(false);
@@ -78,40 +79,156 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
   const [useTextFallback, setUseTextFallback] = useState(false);
   const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
 
-  // Helper to partition plain text or markdown into chapters
+  // Reading flow mode: 'continuous' (all chapters in one smooth document from page 1 to last page) or 'paginated' (one chapter per view)
+  const [readingFlowMode, setReadingFlowMode] = useState<'continuous' | 'paginated'>('continuous');
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // Helper to partition plain text or markdown into clear, readable chapters
   const partitionTextToChapters = (text: string) => {
     const lines = text.split(/\r?\n/);
     const chapters: { title: string; content: string }[] = [];
-    let currTitle = 'Section 1';
+    let currTitle = 'Chapter 1: Opening';
     let currLines: string[] = [];
 
-    for (const line of lines) {
+    const isChapterHeading = (line: string): { isHeading: boolean; title: string } => {
       const trimmed = line.trim();
+      if (!trimmed) return { isHeading: false, title: '' };
+
+      // 1. Explicit === Section / Chapter Title ===
       if (trimmed.startsWith('=== ') && trimmed.endsWith(' ===')) {
-        if (currLines.length > 0) {
-          chapters.push({ title: currTitle, content: currLines.join('\n') });
-        }
-        currTitle = trimmed.replace(/^===\s*/, '').replace(/\s*===$/, '');
-        currLines = [];
-      } else if (
-        /^(chapter|part|section|canto|act|scene|letter|غزل|ردیف|بند|داستان|سیر|دیباچہ)\s+/i.test(trimmed) ||
-        (trimmed.length < 50 && /^[A-Z\s]{4,}$/.test(trimmed))
+        return {
+          isHeading: true,
+          title: trimmed.replace(/^===\s*/, '').replace(/\s*===$/, ''),
+        };
+      }
+
+      // 2. Markdown # Chapter or ## Chapter
+      if (/^#{1,3}\s+(Chapter|Book|Part|Act|Scene|غزل|ردیف|بند|داستان|سیر|دیباچہ|باب|فصل)/i.test(trimmed)) {
+        return {
+          isHeading: true,
+          title: trimmed.replace(/^#{1,3}\s+/, ''),
+        };
+      }
+
+      // 3. Genuine Chapter patterns:
+      // "Chapter 1", "Chapter I", "Chapter the First", "Book One", "Act I, Scene I", etc.
+      // or Urdu literary units: "غزل ۱", "ردیف الف", "داستان", etc.
+      if (
+        /^(chapter|book|part|act|scene|canto|letter)\s+([0-9ivxlcdm]+|[a-z]+)/i.test(trimmed) ||
+        /^(غزل|ردیف|بند|داستان|سیر|دیباچہ|باب|فصل)\s+/u.test(trimmed)
       ) {
-        if (currLines.length > 0) {
-          chapters.push({ title: currTitle, content: currLines.join('\n') });
+        return { isHeading: true, title: trimmed };
+      }
+
+      return { isHeading: false, title: '' };
+    };
+
+    for (const line of lines) {
+      const check = isChapterHeading(line);
+      if (check.isHeading) {
+        if (currLines.join('\n').trim().length > 0) {
+          chapters.push({ title: currTitle, content: currLines.join('\n').trim() });
         }
-        currTitle = trimmed;
+        currTitle = check.title;
         currLines = [];
       } else {
         currLines.push(line);
       }
     }
 
-    if (currLines.length > 0 || chapters.length === 0) {
-      chapters.push({ title: currTitle, content: currLines.join('\n') });
+    if (currLines.join('\n').trim().length > 0 || chapters.length === 0) {
+      chapters.push({ title: currTitle, content: currLines.join('\n').trim() });
+    }
+
+    // If only 1 chapter was found but it's large (e.g. raw unstructured text over 12,000 characters),
+    // paginate it into readable ~1,500-word sections so the user has comfortable reading segments
+    if (chapters.length === 1 && chapters[0].content.length > 12000) {
+      const fullContent = chapters[0].content;
+      const paragraphs = fullContent.split(/\n\s*\n/);
+      const paginatedChapters: { title: string; content: string }[] = [];
+      let pageNum = 1;
+      let currentSectionText: string[] = [];
+      let currentLen = 0;
+
+      for (const p of paragraphs) {
+        currentSectionText.push(p);
+        currentLen += p.length;
+        if (currentLen > 5000) {
+          paginatedChapters.push({
+            title: `Part ${pageNum}`,
+            content: currentSectionText.join('\n\n'),
+          });
+          pageNum++;
+          currentSectionText = [];
+          currentLen = 0;
+        }
+      }
+      if (currentSectionText.length > 0) {
+        paginatedChapters.push({
+          title: `Part ${pageNum}`,
+          content: currentSectionText.join('\n\n'),
+        });
+      }
+      return paginatedChapters;
     }
 
     return chapters;
+  };
+
+  // Strictly reset scroll to Page 1 (top: 0) on book load or chapter switch
+  useEffect(() => {
+    // Reset reading position to Page 1
+    setCurrentTxtChapterIdx(0);
+    setPdfPage(1);
+    setPercentage(0);
+    setCurrentLocationLabel('Page 1');
+
+    const resetToTop = () => {
+      if (scrollContainerRef.current) {
+        scrollContainerRef.current.scrollTop = 0;
+        scrollContainerRef.current.scrollLeft = 0;
+      }
+    };
+
+    resetToTop();
+    const timer = setTimeout(resetToTop, 50);
+    return () => clearTimeout(timer);
+  }, [book.id]);
+
+  // When switching chapters in paginated mode, scroll to top
+  useEffect(() => {
+    if (readingFlowMode === 'paginated' && scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = 0;
+    }
+  }, [currentTxtChapterIdx, readingFlowMode]);
+
+  // Handle scroll in continuous reading mode
+  const handleTextScroll = () => {
+    if (readingFlowMode === 'continuous' && scrollContainerRef.current) {
+      const el = scrollContainerRef.current;
+      const scrollRange = el.scrollHeight - el.clientHeight;
+      if (scrollRange > 0) {
+        const pct = Math.min(100, Math.max(0, Math.round((el.scrollTop / scrollRange) * 100)));
+        setPercentage(pct);
+
+        if (txtChapters.length > 0) {
+          // Approximate current chapter from scroll
+          const approxChapter = Math.min(
+            txtChapters.length,
+            Math.max(1, Math.floor((pct / 100) * txtChapters.length) + 1)
+          );
+          setCurrentLocationLabel(`Chapter ${approxChapter} of ${txtChapters.length} (${pct}%)`);
+        } else {
+          setCurrentLocationLabel(`${pct}% Read`);
+        }
+
+        updateProgress(book.id, {
+          location: `scroll_${pct}`,
+          percentage: pct,
+          updatedAt: Date.now(),
+        });
+      }
+    }
   };
 
   // Theme palettes
@@ -242,9 +359,21 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
         rendition.themes.select(settings.theme);
         rendition.themes.fontSize(`${settings.fontSize}px`);
 
-        // Display initial or stored location
-        const startLocation = book.progress?.location || undefined;
-        await rendition.display(startLocation);
+        // Validate start location: Only use stored location if it is a valid EPUB CFI or HTML file
+        let validEpubLocation: string | undefined = undefined;
+        if (book.progress?.location) {
+          const loc = book.progress.location;
+          if (loc.startsWith('epubcfi(') || loc.includes('.htm') || loc.includes('.xhtml')) {
+            validEpubLocation = loc;
+          }
+        }
+
+        try {
+          await rendition.display(validEpubLocation);
+        } catch {
+          // If stored location failed, start cleanly from page 1 / start of book
+          await rendition.display(undefined);
+        }
         setIsEpubReady(true);
 
         // Generate locations for percentage calculation
@@ -301,7 +430,11 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
         setTxtContent(rawText);
         setCurrentTxtChapterIdx(0);
         setPercentage(0);
-        setCurrentLocationLabel(`Section 1 of ${chapters.length}`);
+        setCurrentLocationLabel(`Page 1 · Chapter 1 of ${chapters.length}`);
+
+        if (scrollContainerRef.current) {
+          scrollContainerRef.current.scrollTop = 0;
+        }
       }
     };
 
@@ -348,8 +481,9 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
         pdfDocRef.current = pdfDoc;
         setPdfTotalPages(pdfDoc.numPages);
 
-        const initialPage = Math.min(Math.max(book.progress?.pageCurrent || 1, 1), pdfDoc.numPages);
-        setPdfPage(initialPage);
+        // Always start clean from page 1 on book load
+        setPdfPage(1);
+        setCurrentLocationLabel(`Page 1 of ${pdfDoc.numPages}`);
       } catch (err) {
         console.error('Failed to parse PDF document:', err);
       }
@@ -419,55 +553,44 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
   }, [pdfPage, pdfScale, book.format, renderPdfPage]);
 
   // ==========================================
-  // 3. TXT RENDERING LOGIC
+  // 3. TXT / HTML RENDERING LOGIC
   // ==========================================
   useEffect(() => {
-    if (book.format !== 'txt') return;
+    if (book.format !== 'txt' && book.format !== 'html') return;
 
     let isMounted = true;
 
     const loadTxt = async () => {
       try {
-        const text = await book.fileBlob.text();
+        let text = await book.fileBlob.text();
         if (!isMounted) return;
 
-        setTxtContent(text);
-
-        // Partition text into natural chapters or sections
-        const lines = text.split(/\r?\n/);
-        const chapters: { title: string; content: string }[] = [];
-        let currTitle = 'Section 1';
-        let currLines: string[] = [];
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (
-            /^(chapter|part|section|canto|act|scene|غزل|ردیف|بند|داستان|سیر|دیباچہ)\s+/i.test(trimmed) ||
-            (trimmed.length < 50 && /^[A-Z\s]{4,}$/.test(trimmed))
-          ) {
-            if (currLines.length > 0) {
-              chapters.push({ title: currTitle, content: currLines.join('\n') });
-            }
-            currTitle = trimmed;
-            currLines = [];
-          } else {
-            currLines.push(line);
+        if (book.format === 'html') {
+          try {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(text, 'text/html');
+            text = doc.body.innerText || text.replace(/<[^>]+>/g, ' ');
+          } catch {
+            text = text.replace(/<[^>]+>/g, ' ');
           }
         }
 
-        if (currLines.length > 0 || chapters.length === 0) {
-          chapters.push({ title: currTitle, content: currLines.join('\n') });
-        }
+        setTxtContent(text);
 
+        // Partition text into chapters using robust detection
+        const chapters = partitionTextToChapters(text);
         setTxtChapters(chapters);
 
-        const savedIdx = book.progress?.pageCurrent ? book.progress.pageCurrent - 1 : 0;
-        const validIdx = Math.min(Math.max(savedIdx, 0), chapters.length - 1);
-        setCurrentTxtChapterIdx(validIdx);
-        setPercentage(Math.round(((validIdx + 1) / chapters.length) * 100));
-        setCurrentLocationLabel(`Section ${validIdx + 1} of ${chapters.length}`);
+        // Always start from page 1 / chapter 1
+        setCurrentTxtChapterIdx(0);
+        setPercentage(0);
+        setCurrentLocationLabel(`Page 1 · Chapter 1 of ${chapters.length}`);
+
+        if (scrollContainerRef.current) {
+          scrollContainerRef.current.scrollTop = 0;
+        }
       } catch (err) {
-        console.error('Failed to read TXT file:', err);
+        console.error('Failed to read TXT/HTML file:', err);
       }
     };
 
@@ -488,20 +611,32 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
       if (pdfPage < pdfTotalPages) {
         setPdfPage((p) => p + 1);
       }
-    } else if (book.format === 'txt' || useTextFallback) {
-      if (currentTxtChapterIdx < txtChapters.length - 1) {
-        const nextIdx = currentTxtChapterIdx + 1;
-        setCurrentTxtChapterIdx(nextIdx);
-        const pct = Math.round(((nextIdx + 1) / txtChapters.length) * 100);
-        setPercentage(pct);
-        setCurrentLocationLabel(`Section ${nextIdx + 1} of ${txtChapters.length}`);
-        updateProgress(book.id, {
-          location: `sec_${nextIdx}`,
-          pageCurrent: nextIdx + 1,
-          pageTotal: txtChapters.length,
-          percentage: pct,
-          updatedAt: Date.now(),
-        });
+    } else if (book.format === 'txt' || book.format === 'html' || useTextFallback) {
+      if (readingFlowMode === 'continuous') {
+        // In continuous mode, scroll down smoothly by 80% viewport
+        if (scrollContainerRef.current) {
+          scrollContainerRef.current.scrollBy({
+            top: scrollContainerRef.current.clientHeight * 0.8,
+            behavior: 'smooth',
+          });
+        }
+      } else {
+        // In paginated mode, go to next chapter
+        if (currentTxtChapterIdx < txtChapters.length - 1) {
+          const nextIdx = currentTxtChapterIdx + 1;
+          setCurrentTxtChapterIdx(nextIdx);
+          const pct = Math.round(((nextIdx + 1) / txtChapters.length) * 100);
+          setPercentage(pct);
+          setCurrentLocationLabel(`Chapter ${nextIdx + 1} of ${txtChapters.length}`);
+          if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
+          updateProgress(book.id, {
+            location: `sec_${nextIdx}`,
+            pageCurrent: nextIdx + 1,
+            pageTotal: txtChapters.length,
+            percentage: pct,
+            updatedAt: Date.now(),
+          });
+        }
       }
     }
   };
@@ -513,20 +648,32 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
       if (pdfPage > 1) {
         setPdfPage((p) => p - 1);
       }
-    } else if (book.format === 'txt' || useTextFallback) {
-      if (currentTxtChapterIdx > 0) {
-        const prevIdx = currentTxtChapterIdx - 1;
-        setCurrentTxtChapterIdx(prevIdx);
-        const pct = Math.round(((prevIdx + 1) / txtChapters.length) * 100);
-        setPercentage(pct);
-        setCurrentLocationLabel(`Section ${prevIdx + 1} of ${txtChapters.length}`);
-        updateProgress(book.id, {
-          location: `sec_${prevIdx}`,
-          pageCurrent: prevIdx + 1,
-          pageTotal: txtChapters.length,
-          percentage: pct,
-          updatedAt: Date.now(),
-        });
+    } else if (book.format === 'txt' || book.format === 'html' || useTextFallback) {
+      if (readingFlowMode === 'continuous') {
+        // In continuous mode, scroll up smoothly by 80% viewport
+        if (scrollContainerRef.current) {
+          scrollContainerRef.current.scrollBy({
+            top: -scrollContainerRef.current.clientHeight * 0.8,
+            behavior: 'smooth',
+          });
+        }
+      } else {
+        // In paginated mode, go to previous chapter
+        if (currentTxtChapterIdx > 0) {
+          const prevIdx = currentTxtChapterIdx - 1;
+          setCurrentTxtChapterIdx(prevIdx);
+          const pct = Math.round(((prevIdx + 1) / txtChapters.length) * 100);
+          setPercentage(pct);
+          setCurrentLocationLabel(`Chapter ${prevIdx + 1} of ${txtChapters.length}`);
+          if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
+          updateProgress(book.id, {
+            location: `sec_${prevIdx}`,
+            pageCurrent: prevIdx + 1,
+            pageTotal: txtChapters.length,
+            percentage: pct,
+            updatedAt: Date.now(),
+          });
+        }
       }
     }
   };
@@ -547,11 +694,11 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [settings.rtlMode, pdfPage, currentTxtChapterIdx, txtChapters.length, pdfTotalPages, isFullscreen]);
+  }, [settings.rtlMode, pdfPage, currentTxtChapterIdx, txtChapters.length, pdfTotalPages, isFullscreen, readingFlowMode]);
 
   // Bookmarking handler
   const handleToggleBookmark = async () => {
-    const isTextMode = book.format === 'txt' || useTextFallback;
+    const isTextMode = book.format === 'txt' || book.format === 'html' || useTextFallback;
     const newBookmark: Bookmark = {
       id: `bm-${Date.now()}`,
       location:
@@ -559,7 +706,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
           ? renditionRef.current?.location?.start?.cfi || 'loc'
           : book.format === 'pdf'
           ? `Page ${pdfPage}`
-          : `Section ${currentTxtChapterIdx + 1}: ${txtChapters[currentTxtChapterIdx]?.title || ''}`,
+          : `Chapter ${currentTxtChapterIdx + 1}: ${txtChapters[currentTxtChapterIdx]?.title || ''}`,
       label:
         !isTextMode && book.format === 'epub'
           ? `Bookmark at ${percentage}%`
@@ -759,7 +906,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
                     {item.label}
                   </button>
                 ))
-              ) : (book.format === 'txt' || useTextFallback) && txtChapters.length > 0 ? (
+              ) : (book.format === 'txt' || book.format === 'html' || useTextFallback) && txtChapters.length > 0 ? (
                 txtChapters.map((ch, idx) => (
                   <button
                     key={idx}
@@ -767,8 +914,18 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
                       setCurrentTxtChapterIdx(idx);
                       const pct = Math.round(((idx + 1) / txtChapters.length) * 100);
                       setPercentage(pct);
-                      setCurrentLocationLabel(`Section ${idx + 1} of ${txtChapters.length}`);
+                      setCurrentLocationLabel(`Chapter ${idx + 1} of ${txtChapters.length}`);
                       setShowToc(false);
+
+                      if (readingFlowMode === 'continuous') {
+                        // Smoothly scroll to chapter anchor
+                        const el = document.getElementById(`chapter-section-${idx}`);
+                        if (el) {
+                          el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                      } else {
+                        if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
+                      }
                     }}
                     className={`w-full text-left px-3 py-2 text-xs rounded transition-colors ${
                       currentTxtChapterIdx === idx
@@ -878,6 +1035,37 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-6">
+              {/* Reading Flow Mode (Continuous Scroll vs Paginated) */}
+              {(book.format === 'txt' || book.format === 'html' || useTextFallback) && (
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wider opacity-70 block mb-2">
+                    Reading Flow Mode
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => setReadingFlowMode('continuous')}
+                      className={`px-3 py-2 rounded text-xs font-medium border flex items-center justify-center gap-1.5 transition-colors ${
+                        readingFlowMode === 'continuous'
+                          ? 'border-amber-600 bg-amber-500/10 text-amber-800 dark:text-amber-300 font-bold'
+                          : 'border-stone-200 dark:border-zinc-800 hover:bg-black/5 dark:hover:bg-white/5'
+                      }`}
+                    >
+                      <AlignLeft className="w-3.5 h-3.5" /> Continuous Scroll
+                    </button>
+                    <button
+                      onClick={() => setReadingFlowMode('paginated')}
+                      className={`px-3 py-2 rounded text-xs font-medium border flex items-center justify-center gap-1.5 transition-colors ${
+                        readingFlowMode === 'paginated'
+                          ? 'border-amber-600 bg-amber-500/10 text-amber-800 dark:text-amber-300 font-bold'
+                          : 'border-stone-200 dark:border-zinc-800 hover:bg-black/5 dark:hover:bg-white/5'
+                      }`}
+                    >
+                      <FileText className="w-3.5 h-3.5" /> Single Chapter
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Color Themes */}
               <div>
                 <label className="text-xs font-semibold uppercase tracking-wider opacity-70 block mb-2">
@@ -1032,61 +1220,118 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
         <button
           onClick={handlePrevPage}
           className="absolute left-0 top-0 bottom-0 w-12 sm:w-16 z-10 flex items-center justify-center opacity-0 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/5 transition-all text-stone-400"
-          title="Previous Page (Left Arrow)"
+          title="Previous Page / Scroll Up"
         >
           <ChevronLeft className="w-8 h-8" />
         </button>
 
-        {/* Reading Canvas Container */}
+        {/* Reading Canvas Container (Strictly starts from top: 0, no flex centering clipping) */}
         <main
-          className="flex-1 h-full overflow-y-auto flex items-center justify-center p-2 sm:p-6"
+          className="flex-1 h-full overflow-hidden flex flex-col justify-start items-stretch"
           dir={settings.rtlMode ? 'rtl' : 'ltr'}
         >
+          {/* EPUB Render Canvas */}
           {book.format === 'epub' && !useTextFallback && (
-            <div
-              ref={epubContainerRef}
-              className="w-full h-full max-w-4xl mx-auto flex items-center justify-center"
-            />
-          )}
-
-          {book.format === 'pdf' && (
-            <div className="w-full h-full overflow-auto flex items-center justify-center">
-              <canvas
-                ref={pdfCanvasRef}
-                className="shadow-md rounded border border-stone-200/50 dark:border-zinc-800 max-w-full"
+            <div className="flex-1 w-full h-full max-w-4xl mx-auto overflow-hidden relative flex items-center justify-center">
+              <div
+                ref={epubContainerRef}
+                className="w-full h-full"
               />
             </div>
           )}
 
-          {(book.format === 'txt' || useTextFallback) && (
-            <div className="w-full h-full max-w-3xl mx-auto overflow-y-auto px-4 py-8">
-              {fallbackNotice && (
-                <div className="mb-6 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-800 dark:text-amber-300">
-                  {fallbackNotice}
-                </div>
-              )}
-              {txtChapters.length > 0 && txtChapters[currentTxtChapterIdx] && (
-                <article
-                  style={{
-                    fontFamily: getFontFamilyCss(),
-                    fontSize: `${settings.fontSize}px`,
-                    lineHeight: settings.lineHeight,
-                  }}
-                  className={`prose max-w-none text-justify ${
-                    settings.fontFamily === 'urdu' ? 'font-urdu-nastaliq leading-[2.4]' : ''
-                  }`}
-                >
-                  <h2
-                    className="text-xl sm:text-2xl font-semibold mb-6 pb-2 border-b border-stone-300 dark:border-zinc-700"
-                    dir={settings.rtlMode ? 'rtl' : 'ltr'}
-                  >
-                    {txtChapters[currentTxtChapterIdx].title}
-                  </h2>
-                  <div className="whitespace-pre-wrap">
-                    {txtChapters[currentTxtChapterIdx].content}
+          {/* PDF Render Canvas */}
+          {book.format === 'pdf' && (
+            <div
+              ref={scrollContainerRef}
+              className="flex-1 w-full h-full overflow-auto flex flex-col items-center justify-start py-6 px-2"
+            >
+              <canvas
+                ref={pdfCanvasRef}
+                className="shadow-lg rounded border border-stone-200/60 dark:border-zinc-800 max-w-full my-auto"
+              />
+            </div>
+          )}
+
+          {/* TXT / Fallback / Urdu Reader View */}
+          {(book.format === 'txt' || book.format === 'html' || useTextFallback) && (
+            <div
+              ref={scrollContainerRef}
+              onScroll={handleTextScroll}
+              className="flex-1 w-full h-full overflow-y-auto overflow-x-hidden px-4 sm:px-8 py-8 focus:outline-none"
+              tabIndex={0}
+            >
+              <div className="max-w-3xl mx-auto">
+                {fallbackNotice && (
+                  <div className="mb-6 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-xs text-amber-800 dark:text-amber-300">
+                    {fallbackNotice}
                   </div>
-                </article>
-              )}
+                )}
+
+                {/* 1. Continuous Reading Flow: All chapters rendered from page 1 through the last page */}
+                {readingFlowMode === 'continuous' && txtChapters.length > 0 && (
+                  <div className="space-y-16 pb-24">
+                    {txtChapters.map((chapter, idx) => (
+                      <article
+                        key={idx}
+                        id={`chapter-section-${idx}`}
+                        style={{
+                          fontFamily: getFontFamilyCss(),
+                          fontSize: `${settings.fontSize}px`,
+                          lineHeight: settings.lineHeight,
+                        }}
+                        className={`prose max-w-none text-justify pb-12 ${
+                          idx < txtChapters.length - 1 ? 'border-b border-stone-200/70 dark:border-zinc-800/80' : ''
+                        } ${settings.fontFamily === 'urdu' ? 'font-urdu-nastaliq leading-[2.5]' : ''}`}
+                      >
+                        <div className="mb-6 not-prose">
+                          <span className="text-[11px] font-mono uppercase tracking-wider opacity-60 block">
+                            {settings.rtlMode ? `حصہ ${idx + 1}` : `Chapter ${idx + 1} of ${txtChapters.length}`}
+                          </span>
+                          <h2
+                            className="text-xl sm:text-2xl font-bold mt-1 pb-2 border-b border-stone-300/40 dark:border-zinc-700/50"
+                            dir={settings.rtlMode ? 'rtl' : 'ltr'}
+                          >
+                            {chapter.title}
+                          </h2>
+                        </div>
+                        <div className="whitespace-pre-wrap">
+                          {chapter.content}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+
+                {/* 2. Paginated Chapter Mode: One chapter per view */}
+                {readingFlowMode === 'paginated' && txtChapters.length > 0 && txtChapters[currentTxtChapterIdx] && (
+                  <article
+                    style={{
+                      fontFamily: getFontFamilyCss(),
+                      fontSize: `${settings.fontSize}px`,
+                      lineHeight: settings.lineHeight,
+                    }}
+                    className={`prose max-w-none text-justify pb-20 ${
+                      settings.fontFamily === 'urdu' ? 'font-urdu-nastaliq leading-[2.5]' : ''
+                    }`}
+                  >
+                    <div className="mb-6 not-prose">
+                      <span className="text-[11px] font-mono uppercase tracking-wider opacity-60 block">
+                        {settings.rtlMode ? `حصہ ${currentTxtChapterIdx + 1}` : `Chapter ${currentTxtChapterIdx + 1} of ${txtChapters.length}`}
+                      </span>
+                      <h2
+                        className="text-xl sm:text-2xl font-bold mt-1 pb-2 border-b border-stone-300/40 dark:border-zinc-700/50"
+                        dir={settings.rtlMode ? 'rtl' : 'ltr'}
+                      >
+                        {txtChapters[currentTxtChapterIdx].title}
+                      </h2>
+                    </div>
+                    <div className="whitespace-pre-wrap">
+                      {txtChapters[currentTxtChapterIdx].content}
+                    </div>
+                  </article>
+                )}
+              </div>
             </div>
           )}
         </main>
@@ -1095,7 +1340,7 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
         <button
           onClick={handleNextPage}
           className="absolute right-0 top-0 bottom-0 w-12 sm:w-16 z-10 flex items-center justify-center opacity-0 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/5 transition-all text-stone-400"
-          title="Next Page (Right Arrow)"
+          title="Next Page / Scroll Down"
         >
           <ChevronRight className="w-8 h-8" />
         </button>
@@ -1128,11 +1373,17 @@ export const Reader: React.FC<ReaderProps> = ({ book, onClose, onUpdateBook }) =
                 const targetPage = Math.max(1, Math.round((val / 100) * pdfTotalPages));
                 setPdfPage(targetPage);
               } else if ((book.format === 'txt' || useTextFallback) && txtChapters.length > 0) {
-                const targetIdx = Math.min(
-                  txtChapters.length - 1,
-                  Math.floor((val / 100) * txtChapters.length)
-                );
-                setCurrentTxtChapterIdx(targetIdx);
+                if (readingFlowMode === 'continuous' && scrollContainerRef.current) {
+                  const el = scrollContainerRef.current;
+                  const targetScroll = (val / 100) * (el.scrollHeight - el.clientHeight);
+                  el.scrollTo({ top: targetScroll, behavior: 'smooth' });
+                } else {
+                  const targetIdx = Math.min(
+                    txtChapters.length - 1,
+                    Math.floor((val / 100) * txtChapters.length)
+                  );
+                  setCurrentTxtChapterIdx(targetIdx);
+                }
               }
             }}
             className="w-full h-1 bg-stone-300 dark:bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-amber-600"
