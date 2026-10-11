@@ -1,0 +1,7 @@
+{
+  "name": "Alexandria Digital Library",
+  "description": "Production-ready digital library and eBook reader with IndexedDB storage, EPUB/PDF engines, multi-format converter, and public domain repositories.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
